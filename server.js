@@ -161,13 +161,22 @@ function amendmentDiff(g) {
     at: g.amendment.at
   };
 }
+// 判断一条记录是否属于「结论生效后新增」：
+// 新版结论存有生效时记录数快照 recordCount，直接按下标比较；
+// 旧版数据没有快照，按生效时间 effectiveAt 重建边界——生效时及之前的记录不算新增。
+// 纯读取推导，不改写旧结论、历史记录或状态，重启后结果一致。
+function isPostConclusion(g, rec, index) {
+  const c = g.conclusion;
+  if (!c) return false;
+  if (Number.isInteger(c.recordCount)) return index >= c.recordCount;
+  return Boolean(rec.at && c.effectiveAt && rec.at > c.effectiveAt);
+}
 function groupSummary(g) {
   const validCount = g.records.filter(r => r.valid).length;
   const invalidCount = g.records.length - validCount;
   const lastDecision = [...g.history].reverse().find(h => ["submit", "approve", "reject"].includes(h.type));
-  // 需补测基线：结论生效时记录数为界，生效前的失效记录不再提示；生效后新增失效记录重新提示
-  const baseline = g.conclusion ? (g.conclusion.recordCount ?? g.records.length) : 0;
-  const newInvalid = g.records.slice(baseline).some(r => !r.valid);
+  // 需补测：生效前的失效记录不提示；生效（含旧结论按生效时间重建的边界）后新增失效记录才提示
+  const newInvalid = g.records.some((r, i) => !r.valid && isPostConclusion(g, r, i));
   const needRetest = g.conclusion
     ? newInvalid
     : invalidCount > 0 || Boolean(lastDecision && lastDecision.type === "reject");
