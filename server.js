@@ -165,6 +165,12 @@ function groupSummary(g) {
   const validCount = g.records.filter(r => r.valid).length;
   const invalidCount = g.records.length - validCount;
   const lastDecision = [...g.history].reverse().find(h => ["submit", "approve", "reject"].includes(h.type));
+  // 需补测基线：结论生效时记录数为界，生效前的失效记录不再提示；生效后新增失效记录重新提示
+  const baseline = g.conclusion ? (g.conclusion.recordCount ?? g.records.length) : 0;
+  const newInvalid = g.records.slice(baseline).some(r => !r.valid);
+  const needRetest = g.conclusion
+    ? newInvalid
+    : invalidCount > 0 || Boolean(lastDecision && lastDecision.type === "reject");
   return {
     id: g.id,
     inkCode: g.inkCode,
@@ -175,7 +181,7 @@ function groupSummary(g) {
     totalCount: g.records.length,
     version: g.conclusion ? g.conclusion.version : null,
     amendmentPending: Boolean(g.amendment),
-    needRetest: invalidCount > 0 || (lastDecision && lastDecision.type === "reject") || false
+    needRetest
   };
 }
 function groupDetail(g) {
@@ -313,7 +319,7 @@ function page() {
         var badges = '';
         if (g.amendmentPending) badges += ' <span class="pill bad">修正复核中</span>';
         if (g.needRetest) badges += ' <span class="pill bad">需补测</span>';
-        return '<article class="card' + (g.id === selectedId ? ' active' : '') + '" onclick="loadDetail(\\'' + g.id + '\\')">' +
+        return '<article class="card' + (g.id === selectedId ? ' active' : '') + '" onclick="openGroup(\\'' + g.id + '\\')">' +
           '<div class="row between"><b>' + esc(g.title) + '</b><span class="pill">' + STATUS_LABEL[g.status] + '</span></div>' +
           '<div class="meta">墨锭 ' + esc(g.inkCode) + '</div>' +
           '<div>有效记录 <b class="' + (g.validCount >= MIN_VALID ? 'ok' : '') + '">' + g.validCount + '</b> / 共 ' + g.totalCount + ' 条' +
@@ -349,7 +355,7 @@ function page() {
       h += '<div class="row between"><h2>' + esc(g.title) + ' <span class="pill">' + STATUS_LABEL[g.status] + '</span></h2><button class="secondary" onclick="closeDetail()">收起</button></div>';
       h += '<div class="meta">墨锭 ' + esc(g.inkCode) + ' · 有效 <b>' + g.validCount + '</b>/' + g.totalCount + ' 条 · 操作人：' + (g.operators.map(esc).join('、') || '暂无') + '</div>';
       if (g.issues.length) h += '<div style="margin-top:6px">' + g.issues.map(i => '<span class="pill bad">⚠ ' + esc(i) + '</span>').join(' ') + '</div>';
-      if (g.needRetest) h += '<div class="banner">存在失效记录或结论被驳回，请补测后重新结题。</div>';
+      if (g.needRetest) h += '<div class="banner">' + (g.conclusion ? '生效后新增失效记录，请安排补测。' : '存在失效记录或结论被驳回，请补测后重新结题。') + '</div>';
 
       h += '<h3>试磨记录（' + g.totalCount + '）</h3><div class="recs">' + (g.records.map(recHtml).join('') || '<div class="meta">暂无记录</div>') + '</div>';
 
@@ -419,20 +425,25 @@ function page() {
       el.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
     window.closeDetail = function () { selectedId = null; detail = null; document.querySelector('#detail').innerHTML = ''; renderGroups(); };
-    window.loadDetail = function (id) { run(() => loadDetail(id)); };
+    // 注意：不要命名为 loadDetail，否则会覆盖同名顶层函数并在包装内自递归导致栈溢出
+    window.openGroup = function (id) { run(() => loadDetail(id)); };
 
     function bindDetailForms() {
       var recForm = document.querySelector('#recForm');
-      if (recForm) recForm.onsubmit = e => { e.preventDefault(); run(async () => {
-        var fd = new FormData(recForm);
-        var payload = { operator: fd.get('operator').trim(), paper: fd.get('paper').trim(),
-          water: Number(fd.get('water')), temperature: Number(fd.get('temperature')),
-          humidity: Number(fd.get('humidity')), score: Number(fd.get('score')), clientToken: recordToken };
-        var out = await api('/api/groups/' + selectedId + '/records', { method: 'POST', body: JSON.stringify(payload) });
-        recordToken = crypto.randomUUID();
-        if (out.record.valid) toast('登记成功，记录有效'); else toast('记录失效：' + out.record.issues.join('；') + '，请补测', true);
-        await load(); await loadDetail(selectedId);
-      }); };
+      if (recForm) recForm.onsubmit = e => { e.preventDefault();
+        var btn = recForm.querySelector('button');
+        btn.disabled = true;   // 提交期间防重复点击，渲染完成或出错后恢复
+        run(async () => {
+          var fd = new FormData(recForm);
+          var payload = { operator: fd.get('operator').trim(), paper: fd.get('paper').trim(),
+            water: Number(fd.get('water')), temperature: Number(fd.get('temperature')),
+            humidity: Number(fd.get('humidity')), score: Number(fd.get('score')), clientToken: recordToken };
+          var out = await api('/api/groups/' + selectedId + '/records', { method: 'POST', body: JSON.stringify(payload) });
+          recordToken = crypto.randomUUID();
+          if (out.record.valid) toast('登记成功，记录有效'); else toast('记录失效：' + out.record.issues.join('；') + '，请补测', true);
+          await load(); await loadDetail(selectedId);
+        }).finally(() => { btn.disabled = false; });
+      };
       var conclForm = document.querySelector('#conclForm');
       if (conclForm) conclForm.onsubmit = e => { e.preventDefault(); run(async () => {
         var fd = new FormData(conclForm);
@@ -628,7 +639,8 @@ const server = http.createServer(async (req, res) => {
         const decision = String(input.decision || "");
         if (decision === "approve") {
           const version = (g.versions.length ? g.versions[g.versions.length - 1].version : 0) + 1;
-          const concluded = { ...g.pending, version, effectiveAt: now(), review: { reviewer, at: now() } };
+          // recordCount 作为需补测基线：生效前的失效记录不再触发提示
+          const concluded = { ...g.pending, version, effectiveAt: now(), review: { reviewer, at: now() }, recordCount: g.records.length };
           g.versions.push(concluded);
           g.conclusion = concluded;
           g.pending = null;
@@ -685,7 +697,8 @@ const server = http.createServer(async (req, res) => {
             version: old.version + 1, effectiveAt: now(),
             review: { reviewer, at: now() },
             amendedBy: g.amendment.modifiedBy, amendReason: g.amendment.reason,
-            supersedes: old.version
+            supersedes: old.version,
+            recordCount: g.records.length   // 新版本生效，重置需补测基线
           };
           g.versions.push(next);   // 旧版本保留在 versions 中，可溯源
           g.conclusion = next;     // 整体切换

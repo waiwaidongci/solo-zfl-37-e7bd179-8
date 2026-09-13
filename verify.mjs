@@ -82,6 +82,8 @@ r = await api("POST", `/api/groups/${G1}/review`, { reviewer: "张三", decision
 check("越权复核被拒：复核人=提交人(403)", r.status === 403);
 r = await api("POST", `/api/groups/${G1}/review`, { reviewer: "周八", decision: "approve" });
 check("复核通过，结论生效", r.status === 200 && r.data.conclusion.version === 1);
+r = await api("GET", `/api/groups/${G1}`);
+check("结论生效后需补测提示结束", r.data.needRetest === false);
 
 // ---------- B. 并发补测：同一 clientToken 只成功一次 ----------
 console.log("\n== B. 并发补测幂等 ==");
@@ -92,6 +94,10 @@ r = await api("GET", `/api/groups/${G1}`);
 const withToken = r.data.records.filter(x => x.clientToken === token);
 check("5 个并发相同 token 请求全部返回成功", results.every(x => x.status === 200 || x.status === 201));
 check("只落了一条记录", withToken.length === 1, `实际 ${withToken.length} 条`);
+r = await api("POST", `/api/groups/${G1}/records`, rec("孙九", 60, { humidity: 90 }));
+check("生效后新增失效记录判失效", r.data.record.valid === false);
+r = await api("GET", `/api/groups/${G1}`);
+check("生效后新增失效记录重新提示需补测", r.data.needRetest === true);
 
 // ---------- C. 重复复核并发：只成功一次 ----------
 console.log("\n== C. 重复复核冲突 ==");
@@ -130,6 +136,7 @@ r = await api("POST", `/api/groups/${G1}/amendments/review`, { reviewer: "张三
 check("越权复核被拒：复核人参与过试磨(403)", r.status === 403);
 r = await api("POST", `/api/groups/${G1}/amendments/review`, { reviewer: "吴十", decision: "approve" });
 check("修正复核通过，整体切换 v2", r.status === 200 && r.data.conclusion.version === 2 && r.data.conclusion.text === "复测后定为良");
+check("新版本生效后需补测提示再次结束", r.data.needRetest === false);
 r = await api("GET", `/api/groups/${G1}`);
 check("旧值保留：v1 在版本历史中", r.data.versions.length === 2 && r.data.versions[0].text === "出墨稳定，适合日常书写");
 check("修正留痕：修改人/原因在案", r.data.conclusion.amendedBy === "周八" && Boolean(r.data.conclusion.amendReason));
@@ -169,7 +176,7 @@ console.log("\n== F. 重启 ==");
 await stopServer();
 await startServer();
 r = await api("GET", `/api/groups/${G1}`);
-check("重启后 G1 修正版 v2 仍在", r.data.conclusion.version === 2 && r.data.records.length === 6);
+check("重启后 G1 修正版 v2 仍在", r.data.conclusion.version === 2 && r.data.records.length === 7);
 r = await api("GET", `/api/groups/${G3}`);
 check("重启后 G3 结论生效、驳回历史在案", r.data.conclusion.version === 1 && r.data.history.some(h => h.type === "reject"));
 r = await api("GET", "/api/groups");
